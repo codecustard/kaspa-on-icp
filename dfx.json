@@ -2,13 +2,14 @@
   "canisters": {
     "kaspa-on-icp-backend": {
       "main": "src/kaspa-on-icp-backend/main.mo",
-      "type": "motoko"
+      "type": "motoko",
+      "initial_cycles": 1000000000000
     }
   },
   "defaults": {
     "build": {
       "args": "",
-      "packtool": ""
+      "packtool": "mops sources"
     }
   },
   "output_env_file": ".env",

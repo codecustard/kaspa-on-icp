@@ -1,0 +1,6 @@
+[dependencies]
+base = "0.13.4"
+ripemd160 = "0.1.2"
+blake2b = "0.1.0"
+test = "2.1.1"
+
