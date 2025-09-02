@@ -1,6 +1,6 @@
 # Kaspa on ICP - Transaction Signing with Threshold Signatures
 
-A production-ready Kaspa transaction signer that leverages the Internet Computer's secure threshold signature infrastructure. This project demonstrates how to generate Kaspa addresses and sign transactions using ICP ECDSA keys.
+A Kaspa transaction signer that leverages the Internet Computer's secure threshold signature infrastructure. This project demonstrates how to generate Kaspa addresses and sign transactions using ICP ECDSA keys.
 
 ## 🎯 **What This Project Does**
 
@@ -186,7 +186,7 @@ This is a work in progress. Contributions are welcome!
 
 ## 📄 **License**
 
-[Add your license here]
+[mit license.]
 
 ## 🔗 **Useful Links**
 
