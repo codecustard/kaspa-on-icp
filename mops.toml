@@ -2,5 +2,6 @@
 base = "0.13.4"
 ripemd160 = "0.1.2"
 blake2b = "0.1.0"
+base-x-encoder = "2.0.0"
 test = "2.1.1"
 

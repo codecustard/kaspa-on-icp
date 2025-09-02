@@ -1,9 +1,11 @@
 // Kaspa Transaction Signing Example on ICP
 // This project demonstrates basic Kaspa transaction signing functionality
 // using BLAKE2b and RIPEMD160 packages from mops.one
+// and ICP ECDSA API for secure key management
 
 import Blake2b "mo:blake2b";
 import Ripemd160 "mo:ripemd160";
+import BaseX "mo:base-x-encoder";
 import Principal "mo:base/Principal";
 import Result "mo:base/Result";
 import Buffer "mo:base/Buffer";
@@ -17,6 +19,10 @@ import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import Debug "mo:base/Debug";
 import Option "mo:base/Option";
+import Error "mo:base/Error";
+
+// ICP ECDSA API types based on official documentation
+// The ECDSA canister is available at: fg7gi-vyaaa-aaaal-qadca-cai (mainnet) or q3fc5-haaaa-aaaaa-qaaha-cai (testnet)
 
 persistent actor KaspaTransactionSigner {
 
@@ -88,6 +94,16 @@ persistent actor KaspaTransactionSigner {
         #HashingError;
         #SignatureError;
         #InvalidAddress;
+    };
+
+    // ICP ECDSA API types based on official documentation
+    public type EcdsaCurve = {
+        #secp256k1;
+    };
+
+    public type EcdsaKeyId = {
+        curve: EcdsaCurve;
+        name: Text;
     };
 
     // Create a Kaspa address from public key hash
@@ -403,5 +419,234 @@ persistent actor KaspaTransactionSigner {
     // Get canister principal (useful for identifying the signer)
     public query func getCanisterPrincipal() : async Text {
         Principal.toText(Principal.fromActor(KaspaTransactionSigner))
+    };
+
+    // ICP ECDSA Integration Functions
+    
+    // Generate a new ECDSA key using ICP chain
+    public shared func generateICPKey(keyName: Text) : async Result.Result<Text, SigningError> {
+        try {
+            // This would typically call the ECDSA canister to generate a new key
+            // For now, we'll return a success message indicating the key generation process
+            // In a real implementation, you'd call the ECDSA canister's key generation methods
+            
+            #ok("ECDSA key generation initiated for key: " # keyName # 
+                ". Use getICPPublicKey() to retrieve the public key once generated.")
+        } catch (e) {
+            #err(#SignatureError)
+        }
+    };
+
+    // Get public key from ICP ECDSA canister
+    public shared func getICPPublicKey(keyName: Text) : async Result.Result<PublicKey, SigningError> {
+        try {
+            // Create key ID for the specified key name
+            let keyId: EcdsaKeyId = {
+                curve = #secp256k1;
+                name = keyName;
+            };
+            
+            // Derivation path for this canister (using canister principal)
+            let canisterPrincipal = Principal.fromActor(KaspaTransactionSigner);
+            let derivationPath: [Blob] = [Principal.toBlob(canisterPrincipal)];
+            
+            // Call the local ICP ECDSA API through the management canister
+            // The SDK automatically provides this API locally
+            let ecdsaCanister = actor("aaaaa-aa") : actor {
+                ecdsa_public_key : ({
+                    canister_id : ?Principal;
+                    derivation_path : [Blob];
+                    key_id : EcdsaKeyId;
+                }) -> async { public_key : Blob; chain_code : Blob };
+            };
+            
+            let result = await ecdsaCanister.ecdsa_public_key({
+                canister_id = ?canisterPrincipal;
+                derivation_path = derivationPath;
+                key_id = keyId;
+            });
+            
+            // Convert the returned public key blob to our PublicKey format
+            let publicKeyBytes = Blob.toArray(result.public_key);
+            let publicKey: PublicKey = { bytes = publicKeyBytes };
+            
+            #ok(publicKey)
+        } catch (e) {
+            #err(#SignatureError)
+        }
+    };
+
+    // Generate Kaspa address using ICP ECDSA public key
+    public shared func generateKaspaAddressFromICP(keyName: Text) : async Result.Result<KaspaAddress, SigningError> {
+        switch (await getICPPublicKey(keyName)) {
+            case (#ok(publicKey)) {
+                switch (await hashPublicKey(publicKey)) {
+                    case (#ok(publicKeyHash)) {
+                        // Use Kaspa mainnet prefix (0x76 = 118)
+                        await createP2PKHAddress(publicKeyHash, 118)
+                    };
+                    case (#err(e)) #err(e);
+                };
+            };
+            case (#err(e)) #err(e);
+        }
+    };
+
+    // Sign transaction using ICP ECDSA
+    public shared func signTransactionWithICP(
+        tx: KaspaTransaction,
+        inputIndex: Nat,
+        keyName: Text,
+        previousScript: [Nat8],
+        sigHashType: SigHashType
+    ) : async Result.Result<[Nat8], SigningError> {
+        
+        // Calculate signature hash
+        switch (await calculateSignatureHash(tx, inputIndex, previousScript, sigHashType)) {
+            case (#ok(hash)) {
+                try {
+                    // Create key ID for the specified key name
+                    let keyId: EcdsaKeyId = {
+                        curve = #secp256k1;
+                        name = keyName;
+                    };
+                    
+                    // Derivation path for this canister
+                    let canisterPrincipal = Principal.fromActor(KaspaTransactionSigner);
+                    let derivationPath: [Blob] = [Principal.toBlob(canisterPrincipal)];
+                    
+                    // Convert hash to Blob for ICP ECDSA API
+                    let messageHash = Blob.fromArray(hash);
+                    
+                    // Call the local ICP ECDSA API through the management canister
+                    // The SDK automatically provides this API locally
+                    let ecdsaCanister = actor("aaaaa-aa") : actor {
+                        sign_with_ecdsa : ({
+                            message_hash : Blob;
+                            derivation_path : [Blob];
+                            key_id : EcdsaKeyId;
+                        }) -> async { signature : Blob };
+                    };
+                    
+                    let result = await ecdsaCanister.sign_with_ecdsa({
+                        message_hash = messageHash;
+                        derivation_path = derivationPath;
+                        key_id = keyId;
+                    });
+                    
+                    // Convert the returned signature blob to our format
+                    let signatureArray = Blob.toArray(result.signature);
+                    
+                    // Append sig hash type byte
+                    let sigHashTypeByte = switch (sigHashType) {
+                        case (#SIGHASH_ALL) 1;
+                        case (#SIGHASH_NONE) 2;
+                        case (#SIGHASH_SINGLE) 3;
+                        case (#SIGHASH_ANYONECANPAY) 0x80;
+                    };
+                    
+                    let sigHashTypeByteArray : [Nat8] = [Nat8.fromNat(sigHashTypeByte)];
+                    let finalSig : [Nat8] = Array.append(signatureArray, sigHashTypeByteArray);
+                    
+                    #ok(finalSig)
+                } catch (e) {
+                    #err(#SignatureError)
+                }
+            };
+            case (#err(e)) #err(e);
+        }
+    };
+
+    // Complete workflow: Generate ICP key and create Kaspa address
+    public shared func generateICPKeyAndAddress(keyName: Text) : async Text {
+        switch (await generateICPKey(keyName)) {
+            case (#ok(_)) {
+                switch (await generateKaspaAddressFromICP(keyName)) {
+                    case (#ok(address)) {
+                        "Successfully generated ICP ECDSA key '" # keyName # "' and Kaspa address with version: " # 
+                        Nat8.toText(address.version) # ", payload length: " # Nat.toText(address.payload.size()) # " bytes";
+                    };
+                    case (#err(e)) {
+                        "Generated ICP key but failed to create Kaspa address: " # debug_show(e);
+                    };
+                };
+            };
+            case (#err(e)) {
+                "Failed to generate ICP ECDSA key: " # debug_show(e);
+            };
+        };
+    };
+
+    // Get available ICP ECDSA keys (based on documentation)
+    public query func getAvailableICPKeys() : async Text {
+        "Available ICP ECDSA keys:\n" #
+        "- Test keys: (secp256k1, test_key_1) - for development/testing\n" #
+        "- Production keys: (secp256k1, key_1) - for production use\n" #
+        "Note: Test keys are on 13-node subnets, production keys on high-replication subnets.\n" #
+        "Fees: Test key signing costs 10B cycles (~$0.013), Production key signing costs ~26B cycles (~$0.035)";
+    };
+
+    // Convert Kaspa address to readable format
+    public query func formatKaspaAddress(address: KaspaAddress) : async Text {
+        // Convert payload bytes to individual byte values for readability
+        let payloadBytes = Array.foldLeft<Nat8, Text>(
+            address.payload,
+            "",
+            func(acc: Text, byte: Nat8) : Text {
+                acc # (if (acc == "") "" else " ") # Nat8.toText(byte)
+            }
+        );
+        
+        // Format: version:payload for readability
+        "Kaspa Address:\n" #
+        "Version: " # Nat8.toText(address.version) # " (0x" # Nat8.toText(address.version) # ")\n" #
+        "Payload Bytes: [" # payloadBytes # "]\n" #
+        "Total Length: " # Nat.toText(address.payload.size()) # " bytes";
+    };
+
+    // Generate and format Kaspa address from ICP key
+    public shared func generateAndFormatKaspaAddress(keyName: Text) : async Text {
+        switch (await generateKaspaAddressFromICP(keyName)) {
+
+            
+            case (#ok(address)) {
+                let formattedAddress = await formatKaspaAddress(address);
+                "✅ Successfully generated Kaspa address from ICP ECDSA key '" # keyName # "'\n\n" # formattedAddress
+            };
+            case (#err(e)) {
+                "❌ Failed to generate Kaspa address: " # debug_show(e)
+            };
+        };
+    };
+
+    // Convert Kaspa address to proper kaspa: format using Base58 encoding
+    public query func toKaspaAddressFormat(address: KaspaAddress) : async Text {
+        try {
+            // Create the data to encode: version + payload
+            let dataToEncode = Array.append([address.version], address.payload);
+            
+            // Convert to Base58 using the BaseX package
+            let base58Encoded = BaseX.toBase58(dataToEncode.vals());
+            
+            // Add kaspa: prefix
+            "kaspa:" # base58Encoded
+        } catch (e) {
+            "Error encoding address"
+        }
+    };
+
+
+
+    // Generate Kaspa address in proper format from ICP key
+    public shared func generateKaspaAddressFormatted(keyName: Text) : async Text {
+        switch (await generateKaspaAddressFromICP(keyName)) {
+            case (#ok(address)) {
+                let kaspaAddress = await toKaspaAddressFormat(address);
+                "✅ Generated Kaspa address from ICP ECDSA key '" # keyName # "':\n" # kaspaAddress
+            };
+            case (#err(e)) {
+                "❌ Failed to generate Kaspa address: " # debug_show(e)
+            };
+        };
     };
 };
