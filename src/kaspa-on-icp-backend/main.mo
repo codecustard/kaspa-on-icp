@@ -1,8 +1,3 @@
-// Kaspa Transaction Signing Example on ICP
-// This project demonstrates basic Kaspa transaction signing functionality
-// using BLAKE2b and RIPEMD160 packages from mops.one
-// and ICP ECDSA API for secure key management
-
 import Blake2b "mo:blake2b";
 import Ripemd160 "mo:ripemd160";
 import BaseX "mo:base-x-encoder";
@@ -18,15 +13,11 @@ import Nat64 "mo:base/Nat64";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import Debug "mo:base/Debug";
-import Option "mo:base/Option";
 import Error "mo:base/Error";
-
-// ICP ECDSA API types based on official documentation
-// The ECDSA canister is available at: fg7gi-vyaaa-aaaal-qadca-cai (mainnet) or q3fc5-haaaa-aaaaa-qaaha-cai (testnet)
+import Cycles "mo:base/ExperimentalCycles";
 
 persistent actor KaspaTransactionSigner {
 
-    // Transaction Input structure
     public type TransactionInput = {
         previousOutpoint: Outpoint;
         signatureScript: [Nat8];
@@ -34,25 +25,21 @@ persistent actor KaspaTransactionSigner {
         sigOpCount: Nat8;
     };
 
-    // Transaction Output structure  
     public type TransactionOutput = {
         value: Nat64;
         scriptPublicKey: ScriptPublicKey;
     };
 
-    // Outpoint structure (references previous transaction output)
     public type Outpoint = {
         transactionId: [Nat8]; // 32 bytes
         index: Nat32;
     };
 
-    // Script Public Key structure
     public type ScriptPublicKey = {
         version: Nat16;
         script: [Nat8];
     };
 
-    // Transaction structure (simplified Kaspa transaction)
     public type KaspaTransaction = {
         version: Nat16;
         inputs: [TransactionInput];
@@ -63,328 +50,65 @@ persistent actor KaspaTransactionSigner {
         payload: [Nat8];
     };
 
-    // Signature Hash Type
     public type SigHashType = {
         #SIGHASH_ALL;
         #SIGHASH_NONE;
         #SIGHASH_SINGLE;
-        #SIGHASH_ANYONECANPAY;
+        #SIGHASH_ALL_ANYONECANPAY;
     };
 
-    // Private key structure (simplified)
-    public type PrivateKey = {
-        bytes: [Nat8]; // 32 bytes
-    };
-
-    // Public key structure
     public type PublicKey = {
-        bytes: [Nat8]; // 33 bytes (compressed) or 65 bytes (uncompressed)
+        bytes: [Nat8]; // 33 bytes (compressed)
     };
 
-    // Address structure
     public type KaspaAddress = {
-        version: Nat8;
-        payload: [Nat8]; // 20 bytes for P2PKH
+        version: Nat8; // 8 for P2PKH-ECDSA mainnet
+        payload: [Nat8]; // 20 bytes
     };
 
-    // Error types
     public type SigningError = {
-        #InvalidPrivateKey;
         #InvalidTransaction;
+        #InvalidInput;
         #HashingError;
         #SignatureError;
         #InvalidAddress;
     };
 
-    // ICP ECDSA API types based on official documentation
-    public type EcdsaCurve = {
-        #secp256k1;
-    };
-
     public type EcdsaKeyId = {
-        curve: EcdsaCurve;
+        curve: { #secp256k1 };
         name: Text;
     };
 
-    // Create a Kaspa address from public key hash
-    public query func createP2PKHAddress(publicKeyHash: [Nat8], networkPrefix: Nat8) : async Result.Result<KaspaAddress, SigningError> {
-        if (publicKeyHash.size() != 20) {
-            return #err(#InvalidAddress);
-        };
-
-        #ok({
-            version = networkPrefix;
-            payload = publicKeyHash;
-        })
-    };
-
-    // Hash public key to create address payload
-    public query func hashPublicKey(publicKey: PublicKey) : async Result.Result<[Nat8], SigningError> {
-        try {
-            // Convert [Nat8] to Blob for Blake2b
-            let publicKeyBlob = Blob.fromArray(publicKey.bytes);
-            
-            // First, hash with BLAKE2b (256-bit output)
-            // Blake2b.hash expects (data: Blob, config: ?Blake2bConfig)
-            let blake2bHash = Blake2b.hash(publicKeyBlob, null);
-            
-            // Convert Blob to [Nat8] for RIPEMD160
-            let blake2bArray = Blob.toArray(blake2bHash);
-            
-            // Then hash with RIPEMD160 (expects [Nat8], returns [Nat8])
-            let ripemdHash = Ripemd160.RIPEMD160().hash(blake2bArray);
-            
-            #ok(ripemdHash)
-        } catch (e) {
-            #err(#HashingError)
+    private func natToVarint(n: Nat) : [Nat8] {
+        if (n < 0xFD) { [Nat8.fromNat(n)] }
+        else if (n <= 0xFFFF) {
+            let n16 = Nat16.fromNat(n);
+            [0xFD, Nat8.fromNat(Nat16.toNat(n16 % 256)), Nat8.fromNat(Nat16.toNat(n16 / 256))]
+        } else if (n <= 0xFFFFFFFF) {
+            let n32 = Nat32.fromNat(n);
+            [
+                0xFE,
+                Nat8.fromNat(Nat32.toNat(n32 % 256)),
+                Nat8.fromNat(Nat32.toNat((n32 / 256) % 256)),
+                Nat8.fromNat(Nat32.toNat((n32 / 65536) % 256)),
+                Nat8.fromNat(Nat32.toNat(n32 / 16777216))
+            ]
+        } else {
+            let n64 = Nat64.fromNat(n);
+            [
+                0xFF,
+                Nat8.fromNat(Nat64.toNat(n64 % 256)),
+                Nat8.fromNat(Nat64.toNat((n64 / 256) % 256)),
+                Nat8.fromNat(Nat64.toNat((n64 / 65536) % 256)),
+                Nat8.fromNat(Nat64.toNat((n64 / 16777216) % 256)),
+                Nat8.fromNat(Nat64.toNat((n64 / 4294967296) % 256)),
+                Nat8.fromNat(Nat64.toNat((n64 / 1099511627776) % 256)),
+                Nat8.fromNat(Nat64.toNat((n64 / 281474976710656) % 256)),
+                Nat8.fromNat(Nat64.toNat(n64 / 72057594037927936))
+            ]
         }
     };
 
-    // Serialize transaction for signing (simplified)
-    private func serializeTransactionForSigning(
-        tx: KaspaTransaction, 
-        inputIndex: Nat, 
-        previousScript: [Nat8],
-        sigHashType: SigHashType
-    ) : Result.Result<[Nat8], SigningError> {
-        
-        let buffer = Buffer.Buffer<Nat8>(1024);
-        
-        // Add version (2 bytes, little endian)
-        buffer.append(Buffer.fromArray(nat16ToBytes(tx.version)));
-        
-        // Add input count (varint, simplified to 1 byte for this example)
-        buffer.add(Nat8.fromNat(tx.inputs.size()));
-        
-        // Serialize inputs
-        for (i in tx.inputs.keys()) {
-            let input = tx.inputs[i];
-            
-            // Previous outpoint (32 bytes + 4 bytes)
-            buffer.append(Buffer.fromArray(input.previousOutpoint.transactionId));
-            buffer.append(Buffer.fromArray(nat32ToBytes(input.previousOutpoint.index)));
-            
-            // Script handling for signing
-            if (i == inputIndex) {
-                // For the input being signed, use the previous output's script
-                buffer.add(Nat8.fromNat(previousScript.size()));
-                buffer.append(Buffer.fromArray(previousScript));
-            } else {
-                // For other inputs, use empty script
-                buffer.add(0);
-            };
-            
-            // Sequence (8 bytes)
-            buffer.append(Buffer.fromArray(nat64ToBytes(input.sequence)));
-        };
-        
-        // Add output count
-        buffer.add(Nat8.fromNat(tx.outputs.size()));
-        
-        // Serialize outputs
-        for (output in tx.outputs.vals()) {
-            // Value (8 bytes)
-            buffer.append(Buffer.fromArray(nat64ToBytes(output.value)));
-            
-            // Script public key
-            buffer.append(Buffer.fromArray(nat16ToBytes(output.scriptPublicKey.version)));
-            buffer.add(Nat8.fromNat(output.scriptPublicKey.script.size()));
-            buffer.append(Buffer.fromArray(output.scriptPublicKey.script));
-        };
-        
-        // Lock time (8 bytes)
-        buffer.append(Buffer.fromArray(nat64ToBytes(tx.lockTime)));
-        
-        // Subnetwork ID (20 bytes)
-        buffer.append(Buffer.fromArray(tx.subnetworkId));
-        
-        // Gas (8 bytes)  
-        buffer.append(Buffer.fromArray(nat64ToBytes(tx.gas)));
-        
-        // Payload length and data
-        buffer.append(Buffer.fromArray(nat64ToBytes(Nat64.fromNat(tx.payload.size()))));
-        buffer.append(Buffer.fromArray(tx.payload));
-        
-        // SigHash type (4 bytes)
-        let sigHashBytes : [Nat8] = switch (sigHashType) {
-            case (#SIGHASH_ALL) { [1, 0, 0, 0] };
-            case (#SIGHASH_NONE) { [2, 0, 0, 0] };
-            case (#SIGHASH_SINGLE) { [3, 0, 0, 0] };
-            case (#SIGHASH_ANYONECANPAY) { [0x80, 0, 0, 0] };
-        };
-        buffer.append(Buffer.fromArray(sigHashBytes));
-        
-        #ok(Buffer.toArray(buffer))
-    };
-
-    // Calculate signature hash for transaction input
-    public func calculateSignatureHash(
-        tx: KaspaTransaction,
-        inputIndex: Nat,
-        previousScript: [Nat8],
-        sigHashType: SigHashType
-    ) : async Result.Result<[Nat8], SigningError> {
-        
-        switch (serializeTransactionForSigning(tx, inputIndex, previousScript, sigHashType)) {
-            case (#ok(serialized)) {
-                try {
-                    // Convert [Nat8] to Blob for Blake2b
-                    let serializedBlob = Blob.fromArray(serialized);
-                    
-                    // Double BLAKE2b hash (similar to Bitcoin's double SHA256)
-                    let firstHash = Blake2b.hash(serializedBlob, null);
-                    let finalHash = Blake2b.hash(firstHash, null);
-                    
-                    // Convert back to [Nat8]
-                    #ok(Blob.toArray(finalHash))
-                } catch (e) {
-                    #err(#HashingError)
-                }
-            };
-            case (#err(e)) #err(e);
-        }
-    };
-
-    // Sign a transaction input (simplified ECDSA simulation)
-    // Note: In a real implementation, you'd use proper ECDSA signing
-    public func signTransactionInput(
-        tx: KaspaTransaction,
-        inputIndex: Nat,
-        privateKey: PrivateKey,
-        previousScript: [Nat8],
-        sigHashType: SigHashType
-    ) : async Result.Result<[Nat8], SigningError> {
-        
-        // Calculate signature hash
-        switch (await calculateSignatureHash(tx, inputIndex, previousScript, sigHashType)) {
-            case (#ok(hash)) {
-                // Simplified signature creation (in reality, use ECDSA)
-                // This is just a placeholder that combines the hash with private key
-                try {
-                    let combinedData = Array.append(hash, privateKey.bytes);
-                    let combinedBlob = Blob.fromArray(combinedData);
-                    let signature = Blake2b.hash(combinedBlob, null);
-                    
-                    // Append sig hash type byte
-                    let sigHashTypeByte = switch (sigHashType) {
-                        case (#SIGHASH_ALL) 1;
-                        case (#SIGHASH_NONE) 2;
-                        case (#SIGHASH_SINGLE) 3;
-                        case (#SIGHASH_ANYONECANPAY) 0x80;
-                    };
-                    
-                    let signatureArray = Blob.toArray(signature);
-                    let sigHashTypeByteArray : [Nat8] = [Nat8.fromNat(sigHashTypeByte)];
-                    let finalSig : [Nat8] = Array.append(signatureArray, sigHashTypeByteArray);
-                    #ok(finalSig)
-                } catch (e) {
-                    #err(#SignatureError)
-                }
-            };
-            case (#err(e)) #err(e);
-        }
-    };
-
-    // Create a simple P2PKH transaction
-    public query func createP2PKHTransaction(
-        inputs: [TransactionInput],
-        outputs: [TransactionOutput],
-        lockTime: Nat64
-    ) : async Result.Result<KaspaTransaction, SigningError> {
-        
-        // Create default subnetwork ID (20 zero bytes)
-        let defaultSubnetworkId = Array.tabulate<Nat8>(20, func(i) = 0);
-        
-        #ok({
-            version = 1;
-            inputs = inputs;
-            outputs = outputs;
-            lockTime = lockTime;
-            subnetworkId = defaultSubnetworkId;
-            gas = 0;
-            payload = [];
-        })
-    };
-
-    // Example function to demonstrate the workflow
-    public func demonstrateKaspaSigning() : async Text {
-        // Create a sample private key (32 bytes)
-        let samplePrivateKey: PrivateKey = {
-            bytes = [
-                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11,
-                0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99
-            ];
-        };
-
-        // Create sample public key (33 bytes compressed)
-        let samplePublicKey: PublicKey = {
-            bytes = [
-                0x02, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
-                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22,
-                0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa
-            ];
-        };
-
-        // Hash the public key to create address
-        let pubKeyHashResult = await hashPublicKey(samplePublicKey);
-        switch (pubKeyHashResult) {
-            case (#ok(pubKeyHash)) {
-                // Create sample transaction input
-                let sampleInput: TransactionInput = {
-                    previousOutpoint = {
-                        transactionId = Array.tabulate<Nat8>(32, func(i) = Nat8.fromNat(i));
-                        index = 0;
-                    };
-                    signatureScript = [];
-                    sequence = 0xFFFFFFFFFFFFFFFF;
-                    sigOpCount = 1;
-                };
-
-                // Create sample transaction output
-                let p2pkhPrefix : [Nat8] = [0x76, 0xa9, 0x14]; // OP_DUP OP_HASH160 PUSH(20)
-                let p2pkhSuffix : [Nat8] = [0x88, 0xac]; // OP_EQUALVERIFY OP_CHECKSIG
-                let p2pkhScript = Array.append(p2pkhPrefix, Array.append(pubKeyHash, p2pkhSuffix));
-                
-                let sampleOutput: TransactionOutput = {
-                    value = 100000000; // 1 KAS in sompi
-                    scriptPublicKey = {
-                        version = 0;
-                        script = p2pkhScript;
-                    };
-                };
-
-                // Create transaction
-                let txResult = await createP2PKHTransaction([sampleInput], [sampleOutput], 0);
-                switch (txResult) {
-                    case (#ok(tx)) {
-                        // Sign the transaction
-                        let previousScript = sampleOutput.scriptPublicKey.script;
-                        let signatureResult = await signTransactionInput(tx, 0, samplePrivateKey, previousScript, #SIGHASH_ALL);
-                        switch (signatureResult) {
-                            case (#ok(signature)) {
-                                "Successfully created and signed Kaspa transaction! Signature length: " # 
-                                Nat.toText(signature.size()) # " bytes";
-                            };
-                            case (#err(e)) {
-                                "Error signing transaction: " # debug_show(e);
-                            };
-                        };
-                    };
-                    case (#err(e)) {
-                        "Error creating transaction: " # debug_show(e);
-                    };
-                };
-            };
-            case (#err(e)) {
-                "Error hashing public key: " # debug_show(e);
-            };
-        };
-    };
-
-    // Utility functions for byte conversion
     private func nat16ToBytes(n: Nat16) : [Nat8] {
         [
             Nat8.fromNat(Nat16.toNat(n) % 256),
@@ -398,7 +122,7 @@ persistent actor KaspaTransactionSigner {
             Nat8.fromNat(val % 256),
             Nat8.fromNat((val / 256) % 256),
             Nat8.fromNat((val / 65536) % 256),
-            Nat8.fromNat((val / 16777216) % 256)
+            Nat8.fromNat(val / 16777216)
         ]
     };
 
@@ -412,46 +136,299 @@ persistent actor KaspaTransactionSigner {
             Nat8.fromNat((val / 4294967296) % 256),
             Nat8.fromNat((val / 1099511627776) % 256),
             Nat8.fromNat((val / 281474976710656) % 256),
-            Nat8.fromNat((val / 72057594037927936) % 256)
+            Nat8.fromNat(val / 72057594037927936)
         ]
     };
 
-    // Get canister principal (useful for identifying the signer)
-    public query func getCanisterPrincipal() : async Text {
-        Principal.toText(Principal.fromActor(KaspaTransactionSigner))
+    private func compressPublicKey(uncompressed: [Nat8]) : Result.Result<PublicKey, SigningError> {
+        if (uncompressed.size() != 64) {
+            return #err(#InvalidInput);
+        };
+        let x = Array.subArray(uncompressed, 0, 32);
+        let yLastByte = uncompressed[63];
+        let prefix = Nat8.fromNat(if (yLastByte % 2 == 0) { 0x02 } else { 0x03 });
+        #ok({ bytes = Array.append([prefix], x) })
     };
 
-    // ICP ECDSA Integration Functions
-    
-    // Generate a new ECDSA key using ICP chain
-    public shared func generateICPKey(keyName: Text) : async Result.Result<Text, SigningError> {
-        try {
-            // This would typically call the ECDSA canister to generate a new key
-            // For now, we'll return a success message indicating the key generation process
-            // In a real implementation, you'd call the ECDSA canister's key generation methods
-            
-            #ok("ECDSA key generation initiated for key: " # keyName # 
-                ". Use getICPPublicKey() to retrieve the public key once generated.")
-        } catch (e) {
-            #err(#SignatureError)
+    public query func hashPublicKey(publicKey: PublicKey) : async Result.Result<[Nat8], SigningError> {
+        if (publicKey.bytes.size() != 33) {
+            return #err(#InvalidInput);
+        };
+        let publicKeyBlob = Blob.fromArray(publicKey.bytes);
+        let blake2bHash = Blake2b.hash(publicKeyBlob, ?{digest_length = 32; key = null; personal = null; salt = null});
+        let blake2bArray = Blob.toArray(blake2bHash);
+        let ripemdHash = Ripemd160.RIPEMD160().hash(blake2bArray);
+        #ok(ripemdHash)
+    };
+
+    public query func createP2PKHAddress(publicKeyHash: [Nat8]) : async Result.Result<KaspaAddress, SigningError> {
+        if (publicKeyHash.size() != 20) {
+            return #err(#InvalidAddress);
+        };
+        #ok({
+            version = 8; // P2PKH-ECDSA mainnet
+            payload = publicKeyHash;
+        })
+    };
+
+    private func base58CheckEncode(data: [Nat8]) : Result.Result<Text, SigningError> {
+        let dataBlob = Blob.fromArray(data);
+        let checksum = Array.subArray(Blob.toArray(Blake2b.hash(dataBlob, ?{digest_length = 32; key = null; personal = null; salt = null})), 0, 4);
+        let fullData = Array.append(data, checksum);
+        let base58Encoded = BaseX.toBase58(fullData.vals());
+        #ok("kaspa:" # base58Encoded)
+    };
+
+    public query func toKaspaAddressFormat(address: KaspaAddress) : async Result.Result<Text, SigningError> {
+        if (address.payload.size() != 20) {
+            return #err(#InvalidAddress);
+        };
+        let dataToEncode = Array.append([address.version], address.payload);
+        base58CheckEncode(dataToEncode)
+    };
+
+    private func serializeTransactionForSigning(
+        tx: KaspaTransaction,
+        inputIndex: Nat,
+        previousScript: [Nat8],
+        sigHashType: SigHashType
+    ) : Result.Result<[Nat8], SigningError> {
+        if (inputIndex >= tx.inputs.size()) {
+            return #err(#InvalidInput);
+        };
+        let buffer = Buffer.Buffer<Nat8>(1024);
+
+        buffer.append(Buffer.fromArray(nat16ToBytes(tx.version)));
+        buffer.append(Buffer.fromArray(natToVarint(tx.inputs.size())));
+
+        for (i in tx.inputs.keys()) {
+            let input = tx.inputs[i];
+            buffer.append(Buffer.fromArray(input.previousOutpoint.transactionId));
+            buffer.append(Buffer.fromArray(nat32ToBytes(input.previousOutpoint.index)));
+            if (i == inputIndex) {
+                buffer.append(Buffer.fromArray(natToVarint(previousScript.size())));
+                buffer.append(Buffer.fromArray(previousScript));
+            } else {
+                buffer.append(Buffer.fromArray([Nat8.fromNat(0)]));
+            };
+            buffer.append(Buffer.fromArray(nat64ToBytes(input.sequence)));
+        };
+
+        buffer.append(Buffer.fromArray(natToVarint(tx.outputs.size())));
+
+        switch (sigHashType) {
+            case (#SIGHASH_NONE) {};
+            case (#SIGHASH_SINGLE) {
+                if (inputIndex < tx.outputs.size()) {
+                    buffer.append(Buffer.fromArray([Nat8.fromNat(1)]));
+                    let output = tx.outputs[inputIndex];
+                    buffer.append(Buffer.fromArray(nat64ToBytes(output.value)));
+                    buffer.append(Buffer.fromArray(nat16ToBytes(output.scriptPublicKey.version)));
+                    buffer.append(Buffer.fromArray(natToVarint(output.scriptPublicKey.script.size())));
+                    buffer.append(Buffer.fromArray(output.scriptPublicKey.script));
+                } else {
+                    buffer.append(Buffer.fromArray([Nat8.fromNat(0)]));
+                };
+            };
+            case (#SIGHASH_ALL or #SIGHASH_ALL_ANYONECANPAY) {
+                buffer.append(Buffer.fromArray(natToVarint(tx.outputs.size())));
+                for (output in tx.outputs.vals()) {
+                    buffer.append(Buffer.fromArray(nat64ToBytes(output.value)));
+                    buffer.append(Buffer.fromArray(nat16ToBytes(output.scriptPublicKey.version)));
+                    buffer.append(Buffer.fromArray(natToVarint(output.scriptPublicKey.script.size())));
+                    buffer.append(Buffer.fromArray(output.scriptPublicKey.script));
+                };
+            };
+        };
+
+        buffer.append(Buffer.fromArray(nat64ToBytes(tx.lockTime)));
+        buffer.append(Buffer.fromArray(tx.subnetworkId));
+        buffer.append(Buffer.fromArray(nat64ToBytes(tx.gas)));
+        buffer.append(Buffer.fromArray(natToVarint(tx.payload.size())));
+        buffer.append(Buffer.fromArray(tx.payload));
+
+        let sigHashByte : Nat8 = switch (sigHashType) {
+            case (#SIGHASH_ALL) 1;
+            case (#SIGHASH_NONE) 2;
+            case (#SIGHASH_SINGLE) 3;
+            case (#SIGHASH_ALL_ANYONECANPAY) 129;
+        };
+        buffer.add(sigHashByte);
+
+        #ok(Buffer.toArray(buffer))
+    };
+
+    public shared func calculateSignatureHash(
+        tx: KaspaTransaction,
+        inputIndex: Nat,
+        previousScript: [Nat8],
+        sigHashType: SigHashType
+    ) : async Result.Result<[Nat8], SigningError> {
+        switch (serializeTransactionForSigning(tx, inputIndex, previousScript, sigHashType)) {
+            case (#ok(serialized)) {
+                try {
+                    let serializedBlob = Blob.fromArray(serialized);
+                    Debug.print("Serialized data size: " # Nat.toText(serialized.size()) # " bytes");
+                    let hash = Blake2b.hash(serializedBlob, ?{digest_length = 32; key = null; personal = null; salt = null});
+                    let hashBytes = Blob.toArray(hash);
+                    Debug.print("Hash size: " # Nat.toText(hashBytes.size()) # " bytes, content: " # debug_show(hashBytes));
+                    if (hashBytes.size() != 32) {
+                        Debug.print("Invalid hash size: " # Nat.toText(hashBytes.size()) # ", expected 32 bytes");
+                        return #err(#HashingError);
+                    };
+                    #ok(hashBytes)
+                } catch (e) {
+                    Debug.print("Hashing error: " # Error.message(e));
+                    #err(#HashingError)
+                }
+            };
+            case (#err(e)) #err(e);
         }
     };
 
-    // Get public key from ICP ECDSA canister
-    public shared func getICPPublicKey(keyName: Text) : async Result.Result<PublicKey, SigningError> {
-        try {
-            // Create key ID for the specified key name
-            let keyId: EcdsaKeyId = {
-                curve = #secp256k1;
-                name = keyName;
+    private func encodeDER(r: [Nat8], s: [Nat8]) : [Nat8] {
+        if (r.size() != 32 or s.size() != 32) {
+            return [];
+        };
+        let rPrefix = if (r[0] >= 0x80) { [0x00 : Nat8] } else { [] : [Nat8] };
+        let sPrefix = if (s[0] >= 0x80) { [0x00 : Nat8] } else { [] : [Nat8] };
+        let rData = Array.append(rPrefix, r);
+        let sData = Array.append(sPrefix, s);
+        let totalLen = 4 + rData.size() + sData.size();
+        
+        let rHeader = [0x02 : Nat8, Nat8.fromNat(rData.size())];
+        let sHeader = [0x02 : Nat8, Nat8.fromNat(sData.size())];
+        let derHeader = [0x30 : Nat8, Nat8.fromNat(totalLen)];
+        
+        Array.append(
+            Array.append(
+                Array.append(derHeader, rHeader),
+                rData
+            ),
+            Array.append(sHeader, sData)
+        )
+    };
+
+    public shared func signTransactionWithICP(
+    tx: KaspaTransaction,
+    inputIndex: Nat,
+    keyName: Text,
+    previousScript: [Nat8],
+    sigHashType: SigHashType
+) : async Result.Result<[Nat8], SigningError> {
+    switch (await calculateSignatureHash(tx, inputIndex, previousScript, sigHashType)) {
+        case (#ok(hash)) {
+            if (hash.size() != 32) {
+                Debug.print("Invalid hash size: " # Nat.toText(hash.size()) # ", expected 32 bytes for ECDSA");
+                return #err(#HashingError);
             };
-            
-            // Derivation path for this canister (using canister principal)
+            try {
+                let keyId: EcdsaKeyId = { curve = #secp256k1; name = keyName };
+                let derivationPath: [Blob] = [];
+                let messageHash = Blob.fromArray(hash);
+                Debug.print("Preparing sign_with_ecdsa call:");
+                Debug.print("  Key ID: curve=secp256k1, name=" # keyName);
+                Debug.print("  Message hash: " # debug_show(hash));
+                Debug.print("  Derivation path: " # debug_show(derivationPath));
+                
+                let ecdsaCanister = actor("aaaaa-aa") : actor {
+                    sign_with_ecdsa : ({
+                        message_hash : Blob;
+                        derivation_path : [Blob];
+                        key_id : EcdsaKeyId;
+                    }) -> async { signature : Blob };
+                };
+                Debug.print("Calling sign_with_ecdsa with args: " # debug_show({
+                    message_hash = messageHash;
+                    derivation_path = derivationPath;
+                    key_id = keyId;
+                }));
+                // Attach required cycles for local replica
+                let cyclesRequired: Nat = 26_153_846_153;
+                Debug.print("Attaching cycles: " # Nat.toText(cyclesRequired));
+                Cycles.add<system>(cyclesRequired);
+                let result = await ecdsaCanister.sign_with_ecdsa({
+                    message_hash = messageHash;
+                    derivation_path = derivationPath;
+                    key_id = keyId;
+                });
+                let rawSig = Blob.toArray(result.signature);
+                Debug.print("Signature length: " # Nat.toText(rawSig.size()) # ", content: " # debug_show(rawSig));
+                if (rawSig.size() != 64) {
+                    Debug.print("Invalid signature size: expected 64 bytes, got " # Nat.toText(rawSig.size()));
+                    return #err(#SignatureError);
+                };
+                let r = Array.subArray(rawSig, 0, 32);
+                let s = Array.subArray(rawSig, 32, 32);
+                let derSig = encodeDER(r, s);
+                let sigHashByte : Nat8 = switch (sigHashType) {
+                    case (#SIGHASH_ALL) 1;
+                    case (#SIGHASH_NONE) 2;
+                    case (#SIGHASH_SINGLE) 3;
+                    case (#SIGHASH_ALL_ANYONECANPAY) 129;
+                };
+                #ok(Array.append(derSig, [sigHashByte]))
+            } catch (e) {
+                Debug.print("ECDSA signing error: " # Error.message(e));
+                #err(#SignatureError)
+            }
+        };
+        case (#err(e)) #err(e);
+    }
+};
+
+    public query func createP2PKHTransaction(
+        inputs: [TransactionInput],
+        outputs: [TransactionOutput],
+        lockTime: Nat64
+    ) : async Result.Result<KaspaTransaction, SigningError> {
+        if (inputs.size() == 0 or outputs.size() == 0) {
+            return #err(#InvalidTransaction);
+        };
+        let defaultSubnetworkId = Array.tabulate<Nat8>(20, func(i) = 0);
+        #ok({
+            version = 1;
+            inputs = inputs;
+            outputs = outputs;
+            lockTime = lockTime;
+            subnetworkId = defaultSubnetworkId;
+            gas = 0;
+            payload = [];
+        })
+    };
+
+    public shared func serializeSignedTransaction(tx: KaspaTransaction) : async Result.Result<[Nat8], SigningError> {
+        let buffer = Buffer.Buffer<Nat8>(1024);
+        buffer.append(Buffer.fromArray(nat16ToBytes(tx.version)));
+        buffer.append(Buffer.fromArray(natToVarint(tx.inputs.size())));
+        for (input in tx.inputs.vals()) {
+            buffer.append(Buffer.fromArray(input.previousOutpoint.transactionId));
+            buffer.append(Buffer.fromArray(nat32ToBytes(input.previousOutpoint.index)));
+            buffer.append(Buffer.fromArray(natToVarint(input.signatureScript.size())));
+            buffer.append(Buffer.fromArray(input.signatureScript));
+            buffer.append(Buffer.fromArray(nat64ToBytes(input.sequence)));
+            buffer.add(input.sigOpCount);
+        };
+        buffer.append(Buffer.fromArray(natToVarint(tx.outputs.size())));
+        for (output in tx.outputs.vals()) {
+            buffer.append(Buffer.fromArray(nat64ToBytes(output.value)));
+            buffer.append(Buffer.fromArray(nat16ToBytes(output.scriptPublicKey.version)));
+            buffer.append(Buffer.fromArray(natToVarint(output.scriptPublicKey.script.size())));
+            buffer.append(Buffer.fromArray(output.scriptPublicKey.script));
+        };
+        buffer.append(Buffer.fromArray(nat64ToBytes(tx.lockTime)));
+        buffer.append(Buffer.fromArray(tx.subnetworkId));
+        buffer.append(Buffer.fromArray(nat64ToBytes(tx.gas)));
+        buffer.append(Buffer.fromArray(natToVarint(tx.payload.size())));
+        buffer.append(Buffer.fromArray(tx.payload));
+        #ok(Buffer.toArray(buffer))
+    };
+
+    public shared func generateKaspaAddressFromICP(keyName: Text) : async Result.Result<KaspaAddress, SigningError> {
+        try {
+            let keyId: EcdsaKeyId = { curve = #secp256k1; name = keyName };
             let canisterPrincipal = Principal.fromActor(KaspaTransactionSigner);
             let derivationPath: [Blob] = [Principal.toBlob(canisterPrincipal)];
-            
-            // Call the local ICP ECDSA API through the management canister
-            // The SDK automatically provides this API locally
             let ecdsaCanister = actor("aaaaa-aa") : actor {
                 ecdsa_public_key : ({
                     canister_id : ?Principal;
@@ -459,97 +436,104 @@ persistent actor KaspaTransactionSigner {
                     key_id : EcdsaKeyId;
                 }) -> async { public_key : Blob; chain_code : Blob };
             };
-            
+            Debug.print("Calling ecdsa_public_key with key: " # keyName);
             let result = await ecdsaCanister.ecdsa_public_key({
                 canister_id = ?canisterPrincipal;
                 derivation_path = derivationPath;
                 key_id = keyId;
             });
-            
-            // Convert the returned public key blob to our PublicKey format
             let publicKeyBytes = Blob.toArray(result.public_key);
-            let publicKey: PublicKey = { bytes = publicKeyBytes };
             
-            #ok(publicKey)
+            if (publicKeyBytes.size() != 33) {
+                Debug.print("Invalid public key size: expected 33 bytes, got " # Nat.toText(publicKeyBytes.size()));
+                return #err(#InvalidInput);
+            };
+            
+            let compressedPubKey: PublicKey = { bytes = publicKeyBytes };
+            
+            switch (await hashPublicKey(compressedPubKey)) {
+                case (#ok(pubKeyHash)) {
+                    await createP2PKHAddress(pubKeyHash)
+                };
+                case (#err(e)) #err(e);
+            };
         } catch (e) {
+            Debug.print("ECDSA public key error: " # Error.message(e));
             #err(#SignatureError)
         }
     };
 
-    // Generate Kaspa address using ICP ECDSA public key
-    public shared func generateKaspaAddressFromICP(keyName: Text) : async Result.Result<KaspaAddress, SigningError> {
-        switch (await getICPPublicKey(keyName)) {
-            case (#ok(publicKey)) {
-                switch (await hashPublicKey(publicKey)) {
-                    case (#ok(publicKeyHash)) {
-                        // Use Kaspa mainnet prefix (0x76 = 118)
-                        await createP2PKHAddress(publicKeyHash, 118)
-                    };
-                    case (#err(e)) #err(e);
-                };
-            };
-            case (#err(e)) #err(e);
-        }
-    };
-
-    // Sign transaction using ICP ECDSA
-    public shared func signTransactionWithICP(
-        tx: KaspaTransaction,
-        inputIndex: Nat,
-        keyName: Text,
-        previousScript: [Nat8],
-        sigHashType: SigHashType
+    public shared func createAndSignP2PKHTransaction(
+        inputs: [TransactionInput],
+        outputs: [TransactionOutput],
+        lockTime: Nat64,
+        keyName: Text
     ) : async Result.Result<[Nat8], SigningError> {
-        
-        // Calculate signature hash
-        switch (await calculateSignatureHash(tx, inputIndex, previousScript, sigHashType)) {
-            case (#ok(hash)) {
+        switch (await createP2PKHTransaction(inputs, outputs, lockTime)) {
+            case (#ok(tx)) {
                 try {
-                    // Create key ID for the specified key name
-                    let keyId: EcdsaKeyId = {
-                        curve = #secp256k1;
-                        name = keyName;
-                    };
-                    
-                    // Derivation path for this canister
+                    let keyId: EcdsaKeyId = { curve = #secp256k1; name = keyName };
                     let canisterPrincipal = Principal.fromActor(KaspaTransactionSigner);
                     let derivationPath: [Blob] = [Principal.toBlob(canisterPrincipal)];
-                    
-                    // Convert hash to Blob for ICP ECDSA API
-                    let messageHash = Blob.fromArray(hash);
-                    
-                    // Call the local ICP ECDSA API through the management canister
-                    // The SDK automatically provides this API locally
                     let ecdsaCanister = actor("aaaaa-aa") : actor {
-                        sign_with_ecdsa : ({
-                            message_hash : Blob;
+                        ecdsa_public_key : ({
+                            canister_id : ?Principal;
                             derivation_path : [Blob];
                             key_id : EcdsaKeyId;
-                        }) -> async { signature : Blob };
+                        }) -> async { public_key : Blob; chain_code : Blob };
                     };
-                    
-                    let result = await ecdsaCanister.sign_with_ecdsa({
-                        message_hash = messageHash;
+                    Debug.print("Calling ecdsa_public_key for signing with key: " # keyName);
+                    let pubKeyResult = await ecdsaCanister.ecdsa_public_key({
+                        canister_id = ?canisterPrincipal;
                         derivation_path = derivationPath;
                         key_id = keyId;
                     });
+                    let publicKeyBytes = Blob.toArray(pubKeyResult.public_key);
                     
-                    // Convert the returned signature blob to our format
-                    let signatureArray = Blob.toArray(result.signature);
-                    
-                    // Append sig hash type byte
-                    let sigHashTypeByte = switch (sigHashType) {
-                        case (#SIGHASH_ALL) 1;
-                        case (#SIGHASH_NONE) 2;
-                        case (#SIGHASH_SINGLE) 3;
-                        case (#SIGHASH_ANYONECANPAY) 0x80;
+                    if (publicKeyBytes.size() != 33) {
+                        Debug.print("Invalid public key size: expected 33 bytes, got " # Nat.toText(publicKeyBytes.size()));
+                        return #err(#InvalidInput);
                     };
                     
-                    let sigHashTypeByteArray : [Nat8] = [Nat8.fromNat(sigHashTypeByte)];
-                    let finalSig : [Nat8] = Array.append(signatureArray, sigHashTypeByteArray);
+                    let compressedPubKey: PublicKey = { bytes = publicKeyBytes };
                     
-                    #ok(finalSig)
+                    switch (await hashPublicKey(compressedPubKey)) {
+                        case (#ok(pubKeyHash)) {
+                            let p2pkhPrefix : [Nat8] = [0x76, 0xa9, 0x14];
+                            let p2pkhSuffix : [Nat8] = [0x88, 0xac];
+                            let previousScript = Array.append(p2pkhPrefix, Array.append(pubKeyHash, p2pkhSuffix));
+                            
+                            let signedInputs = Array.thaw<TransactionInput>(tx.inputs);
+                            for (i in tx.inputs.keys()) {
+                                switch (await signTransactionWithICP(tx, i, keyName, previousScript, #SIGHASH_ALL)) {
+                                    case (#ok(signature)) {
+                                        let signatureScript = Array.append(
+                                            Array.append([Nat8.fromNat(signature.size())], signature),
+                                            Array.append([Nat8.fromNat(compressedPubKey.bytes.size())], compressedPubKey.bytes)
+                                        );
+                                        signedInputs[i] := {
+                                            previousOutpoint = tx.inputs[i].previousOutpoint;
+                                            signatureScript = signatureScript;
+                                            sequence = tx.inputs[i].sequence;
+                                            sigOpCount = 1;
+                                        };
+                                    };
+                                    case (#err(e)) {
+                                        Debug.print("Signing input " # Nat.toText(i) # " failed: " # debug_show(e));
+                                        return #err(e);
+                                    };
+                                };
+                            };
+                            let signedTx = { tx with inputs = Array.freeze(signedInputs) };
+                            await serializeSignedTransaction(signedTx)
+                        };
+                        case (#err(e)) {
+                            Debug.print("Hash public key error: " # debug_show(e));
+                            #err(e);
+                        };
+                    };
                 } catch (e) {
+                    Debug.print("Public key retrieval error: " # Error.message(e));
                     #err(#SignatureError)
                 }
             };
@@ -557,96 +541,120 @@ persistent actor KaspaTransactionSigner {
         }
     };
 
-    // Complete workflow: Generate ICP key and create Kaspa address
-    public shared func generateICPKeyAndAddress(keyName: Text) : async Text {
-        switch (await generateICPKey(keyName)) {
-            case (#ok(_)) {
-                switch (await generateKaspaAddressFromICP(keyName)) {
-                    case (#ok(address)) {
-                        "Successfully generated ICP ECDSA key '" # keyName # "' and Kaspa address with version: " # 
-                        Nat8.toText(address.version) # ", payload length: " # Nat.toText(address.payload.size()) # " bytes";
+    public shared func demonstrateKaspaSigning(keyName: Text) : async Text {
+        try {
+            switch (await generateKaspaAddressFromICP(keyName)) {
+                case (#ok(address)) {
+                    let sampleInput: TransactionInput = {
+                        previousOutpoint = {
+                            transactionId = Array.tabulate<Nat8>(32, func(i) = Nat8.fromNat(i));
+                            index = 0;
+                        };
+                        signatureScript = [];
+                        sequence = 0xFFFFFFFFFFFFFFFF;
+                        sigOpCount = 1;
                     };
-                    case (#err(e)) {
-                        "Generated ICP key but failed to create Kaspa address: " # debug_show(e);
+
+                    let p2pkhPrefix : [Nat8] = [0x76, 0xa9, 0x14];
+                    let p2pkhSuffix : [Nat8] = [0x88, 0xac];
+                    let p2pkhScript = Array.append(p2pkhPrefix, Array.append(address.payload, p2pkhSuffix));
+                    
+                    let sampleOutput: TransactionOutput = {
+                        value = 100000000;
+                        scriptPublicKey = {
+                            version = 0;
+                            script = p2pkhScript;
+                        };
+                    };
+
+                    switch (await createAndSignP2PKHTransaction([sampleInput], [sampleOutput], 0, keyName)) {
+                        case (#ok(signedTx)) {
+                            let addressText = await formatKaspaAddress(address);
+                            "✅ Successfully created and signed Kaspa transaction!\n" #
+                            "📦 Signed Tx Length: " # Nat.toText(signedTx.size()) # " bytes\n" #
+                            "🔑 " # addressText # "\n" #
+                            "💰 Transaction Value: 1.0 KAS (100000000 sompi)\n" #
+                            "🎯 Key Name: " # keyName
+                        };
+                        case (#err(e)) {
+                            let addressText = await formatKaspaAddress(address);
+                            "❌ Error signing transaction: " # debug_show(e) # "\n" #
+                            "🏠 But address generation worked: " # addressText
+                        };
                     };
                 };
+                case (#err(e)) {
+                    "❌ Error generating address: " # debug_show(e)
+                };
             };
-            case (#err(e)) {
-                "Failed to generate ICP ECDSA key: " # debug_show(e);
-            };
-        };
-    };
-
-    // Get available ICP ECDSA keys (based on documentation)
-    public query func getAvailableICPKeys() : async Text {
-        "Available ICP ECDSA keys:\n" #
-        "- Test keys: (secp256k1, test_key_1) - for development/testing\n" #
-        "- Production keys: (secp256k1, key_1) - for production use\n" #
-        "Note: Test keys are on 13-node subnets, production keys on high-replication subnets.\n" #
-        "Fees: Test key signing costs 10B cycles (~$0.013), Production key signing costs ~26B cycles (~$0.035)";
-    };
-
-    // Convert Kaspa address to readable format
-    public query func formatKaspaAddress(address: KaspaAddress) : async Text {
-        // Convert payload bytes to individual byte values for readability
-        let payloadBytes = Array.foldLeft<Nat8, Text>(
-            address.payload,
-            "",
-            func(acc: Text, byte: Nat8) : Text {
-                acc # (if (acc == "") "" else " ") # Nat8.toText(byte)
-            }
-        );
-        
-        // Format: version:payload for readability
-        "Kaspa Address:\n" #
-        "Version: " # Nat8.toText(address.version) # " (0x" # Nat8.toText(address.version) # ")\n" #
-        "Payload Bytes: [" # payloadBytes # "]\n" #
-        "Total Length: " # Nat.toText(address.payload.size()) # " bytes";
-    };
-
-    // Generate and format Kaspa address from ICP key
-    public shared func generateAndFormatKaspaAddress(keyName: Text) : async Text {
-        switch (await generateKaspaAddressFromICP(keyName)) {
-
-            
-            case (#ok(address)) {
-                let formattedAddress = await formatKaspaAddress(address);
-                "✅ Successfully generated Kaspa address from ICP ECDSA key '" # keyName # "'\n\n" # formattedAddress
-            };
-            case (#err(e)) {
-                "❌ Failed to generate Kaspa address: " # debug_show(e)
-            };
-        };
-    };
-
-    // Convert Kaspa address to proper kaspa: format using Base58 encoding
-    public query func toKaspaAddressFormat(address: KaspaAddress) : async Text {
-        try {
-            // Create the data to encode: version + payload
-            let dataToEncode = Array.append([address.version], address.payload);
-            
-            // Convert to Base58 using the BaseX package
-            let base58Encoded = BaseX.toBase58(dataToEncode.vals());
-            
-            // Add kaspa: prefix
-            "kaspa:" # base58Encoded
         } catch (e) {
-            "Error encoding address"
+            "💥 Caught exception: " # Error.message(e)
         }
     };
 
-
-
-    // Generate Kaspa address in proper format from ICP key
-    public shared func generateKaspaAddressFormatted(keyName: Text) : async Text {
-        switch (await generateKaspaAddressFromICP(keyName)) {
-            case (#ok(address)) {
-                let kaspaAddress = await toKaspaAddressFormat(address);
-                "✅ Generated Kaspa address from ICP ECDSA key '" # keyName # "':\n" # kaspaAddress
+    public shared func formatKaspaAddress(address: KaspaAddress) : async Text {
+        switch (await toKaspaAddressFormat(address)) {
+            case (#ok(encoded)) {
+                "Kaspa Address:\n" #
+                "Version: " # Nat8.toText(address.version) # "\n" #
+                "Encoded: " # encoded
             };
-            case (#err(e)) {
-                "❌ Failed to generate Kaspa address: " # debug_show(e)
+            case (#err(_)) {
+                "Error formatting address"
             };
-        };
+        }
     };
-};
+
+    public shared func debugGenerateKaspaAddress(keyName: Text) : async Text {
+        try {
+            let keyId: EcdsaKeyId = { curve = #secp256k1; name = keyName };
+            let canisterPrincipal = Principal.fromActor(KaspaTransactionSigner);
+            let derivationPath: [Blob] = [Principal.toBlob(canisterPrincipal)];
+            let ecdsaCanister = actor("aaaaa-aa") : actor {
+                ecdsa_public_key : ({
+                    canister_id : ?Principal;
+                    derivation_path : [Blob];
+                    key_id : EcdsaKeyId;
+                }) -> async { public_key : Blob; chain_code : Blob };
+            };
+            Debug.print("Calling ecdsa_public_key with key: " # keyName);
+            let result = await ecdsaCanister.ecdsa_public_key({
+                canister_id = ?canisterPrincipal;
+                derivation_path = derivationPath;
+                key_id = keyId;
+            });
+            let publicKeyBytes = Blob.toArray(result.public_key);
+            
+            let step1 = "Step 1 - Got public key: " # Nat.toText(publicKeyBytes.size()) # " bytes\n";
+            
+            if (publicKeyBytes.size() != 33) {
+                return step1 # "Error: Expected 33 bytes, got " # Nat.toText(publicKeyBytes.size());
+            };
+            
+            let compressedPubKey: PublicKey = { bytes = publicKeyBytes };
+            let step2 = step1 # "Step 2 - Created PublicKey structure\n";
+            
+            switch (await hashPublicKey(compressedPubKey)) {
+                case (#ok(pubKeyHash)) {
+                    let step3 = step2 # "Step 3 - Hashed public key, got " # Nat.toText(pubKeyHash.size()) # " bytes\n";
+                    
+                    switch (await createP2PKHAddress(pubKeyHash)) {
+                        case (#ok(address)) {
+                            step3 # "Step 4 - Successfully created address!\n" #
+                            "Address version: " # Nat8.toText(address.version) # "\n" #
+                            "Payload size: " # Nat.toText(address.payload.size())
+                        };
+                        case (#err(e)) {
+                            step3 # "Step 4 - Error creating P2PKH address: " # debug_show(e)
+                        };
+                    };
+                };
+                case (#err(e)) {
+                    step2 # "Step 3 - Error hashing public key: " # debug_show(e)
+                };
+            };
+        } catch (e) {
+            "Caught exception: " # Error.message(e)
+        }
+    };
+}
